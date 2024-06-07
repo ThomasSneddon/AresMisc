@@ -389,6 +389,8 @@ const DWORD YR_CRC_1001_UC = 0x1B499086;
 
 SYRINGE_HANDSHAKE(pInfo)
 {
+	return S_OK;
+
 	if(pInfo) {
 		const char* AcceptMsg = "Found Yuri's Revenge %s. Applying Ares " PRODUCT_STR ".";
 		const char* PatchDetectedMessage = "Found %s. Ares " PRODUCT_STR " is not compatible with other patches.";
