@@ -115,6 +115,17 @@ public:
 
 	ABufferClass(RectangleStruct rect)
 		{ JMP_THIS(0x410CE0); }
+	
+	void* GetBufferAt(const Point2D pLocation) const 
+		{ JMP_THIS(0x4114B0); }
+	
+	void* AdjustedGetBufferAt(const Point2D& Location) const
+	{ 
+		Point2D temp = Location;
+		temp.Y -= this->rect.Y;
+		
+		return this->GetBufferAt(temp);
+	}
 
 	RectangleStruct rect;
 	int field_10;
@@ -133,6 +144,17 @@ public:
 
 	ZBufferClass(RectangleStruct rect)
 		{ JMP_THIS(0x7BC970); }
+	
+	void* GetBufferAt(const Point2D pLocation) const 
+		{ JMP_THIS(0x7BD130); }
+	
+	void* AdjustedGetBufferAt(const Point2D& Location) const 
+	{ 
+		Point2D temp = Location;
+		temp.Y -= this->rect.Y;
+		
+		return this->GetBufferAt(temp);
+	}
 
 	RectangleStruct rect;
 	int field_10;
@@ -140,7 +162,7 @@ public:
 	byte* BufferStart;
 	byte* BufferEndpoint;
 	int BufferSize;
-	int field_24;
+	int CurrentBaseZ;
 	int W;
 	int H;
 };

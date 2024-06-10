@@ -241,7 +241,7 @@ DEFINE_HOOK(4F4583, GScreenClass_DrawOnTop_RasterizerTest, 6)
 
 						for (int i = minpix; i <= maxpix; i++)
 						{
-							double wlerp = (i - ras.v.bottomy) / pixdiff;
+							double wlerp = pixdiff == 0.0 ? 0.0 : (i - ras.v.bottomy) / pixdiff;
 							double w1 = ras.v.bottom_weight[0] + wlerp * wdiffs[0],
 								w2 = ras.v.bottom_weight[1] + wlerp * wdiffs[1],
 								w3 = ras.v.bottom_weight[2] + wlerp * wdiffs[2];
@@ -276,7 +276,7 @@ DEFINE_HOOK(4F4583, GScreenClass_DrawOnTop_RasterizerTest, 6)
 						int row = ras.h.y;
 						for (int i = minpix; i <= maxpix; i++)
 						{
-							double wlerp = (i - ras.h.leftx) / pixdiff;
+							double wlerp = pixdiff == 0.0 ? 0.0 : (i - ras.h.leftx) / pixdiff;
 							double w1 = ras.h.left_weight[0] + wlerp * wdiffs[0],
 								w2 = ras.h.left_weight[1] + wlerp * wdiffs[1],
 								w3 = ras.h.left_weight[2] + wlerp * wdiffs[2];
@@ -306,3 +306,188 @@ DEFINE_HOOK(4F4583, GScreenClass_DrawOnTop_RasterizerTest, 6)
 
 	return 0;
 }
+
+
+//let's rasterize some lasers
+DEFINE_HOOK(550D0F, LaserClass_Draw_Lines, 6)
+{
+	/*
+	    00-lt                       rt-01
+	Src ================================ Dst
+	    10-lb                       rb-11
+	*/
+	static UniqueGamePtr<SHPReference> texture = {};
+
+	if (!texture)
+		texture.reset(new SHPReference("LASERMASK.SHP"));
+
+	if (!texture || texture->HasCompression(0))
+		return 0;
+
+	GET(LaserDrawClass*, laser, EBX);
+	GET_STACK(Point2D, screen_src, 0x7C);
+	GET_STACK(Point2D, screen_dst, 0x74);
+	GET(int, src_zadj, EBP);
+	GET_STACK(int, dst_zadj, 0x48);
+	
+	using vec2 = YRRasterizer::vec2;
+	using vec3 = Vector3D<double>;
+
+	static const vec3 up = { 0.0,0.0,1.0 };
+	static constexpr double half_thickness = 12.0;
+	static const double pixels_to_leptons = 256.0 / 30.0 / sqrt(2.0);
+
+	const auto modeldiff = laser->Target - laser->Source;
+	const vec3 fmodeldiff = { modeldiff.X,modeldiff.Y,modeldiff.Z };
+	vec3 left = up.CrossProduct(fmodeldiff);
+	if (left.MagnitudeSquared() <= 0.0000001)
+		left = { 1.0,-1.0,0.0 };
+
+	left *= half_thickness * pixels_to_leptons / left.Magnitude();
+	CoordStruct ileft = { static_cast<int>(left.X),static_cast<int>(left.Y),static_cast<int>(left.Z) },
+		iltpoint = laser->Source + ileft;
+
+	double deltaz = -TacticalClass::ZCoordsToScreenPixels(ileft.Z);
+	Point2D iltscrpoint = { };
+	TacticalClass::Instance->CoordsToClient(&iltpoint, &iltscrpoint);
+	auto scr_diff = iltscrpoint - screen_src;
+
+	vec2 fscr_diff = { scr_diff.X,scr_diff.Y };
+	vec2 scrsrc = { screen_src.X,screen_src.Y }, scrdst = { screen_dst.X,screen_dst.Y };
+
+
+	vec2 lt = scrsrc + fscr_diff, lb = scrsrc - fscr_diff, rt = scrdst + fscr_diff, rb = scrdst - fscr_diff;
+	YRRasterizer::rasterize_result results[] = { YRRasterizer::rasterize_triangle(lt,lb,rt),YRRasterizer::rasterize_triangle(lb,rt,rb) };
+	const auto surface = DSurface::Hidden_2;
+
+	RectangleStruct bound = {};
+	surface->GetRect(&bound);
+	bound = Drawing::Intersect(&bound, &Drawing::SurfaceDimensions_Hidden, nullptr, nullptr);
+
+	const auto zbuffer = ZBufferClass::ZBuffer;
+	double zbase = zbuffer->rect.Y - bound.Y + zbuffer->CurrentBaseZ,
+		src_zbase = zbase - scrsrc.Y + src_zadj, dst_zbase = zbase - scrdst.Y + dst_zadj;
+
+	double zvalues[] = { src_zbase + deltaz,src_zbase - deltaz,dst_zbase + deltaz,dst_zbase - deltaz };
+	static const vec2 texcoords[] = { {0.0,0.0},{1.0,0.0},{0.0,1.0},{1.0,1.0} };
+
+	const auto pixels = texture->GetPixels(0);
+	const auto surfacedata = reinterpret_cast<byte*>(surface->Lock(0, 0));
+
+	if (!pixels || !surfacedata) {
+		surface->Unlock();
+		return 0;
+	}
+
+	const auto framebound = texture->GetFrameBounds(0);
+	const double framewidth = framebound.Width, frameheight = framebound.Height;
+	const int pitch = surface->GetPitch();
+	const auto color = laser->InnerColor;
+	const vec3 fcolor = { color.R,color.G,color.B };//255
+
+	const auto shade = [&](const YRRasterizer::rasterize_result& result, const vec2 uvs[], const double zvals[]) {
+
+		if (result.direction == YRRasterizer::rasterize_dir::vertical)
+		{
+			for (const auto& ras : result.ranges)
+			{
+				if (ras.v.x >= bound.X && ras.v.x < bound.X + bound.Width)
+				{
+					int minpix = std::max(bound.Y, ras.v.bottomy);
+					int maxpix = std::min(bound.Y + bound.Height - 1, ras.v.topy);
+
+					double pixdiff = ras.v.topy - ras.v.bottomy;
+					double wdiffs[] = { ras.v.top_weight[0] - ras.v.bottom_weight[0],ras.v.top_weight[1] - ras.v.bottom_weight[1],ras.v.top_weight[2] - ras.v.bottom_weight[2] };
+					auto zbuff = reinterpret_cast<PWORD>(zbuffer->AdjustedGetBufferAt({ ras.v.x,minpix }));
+
+					for (int i = minpix; i <= maxpix; i++)
+					{
+						double wlerp = pixdiff == 0.0 ? 0.0 : (i - ras.v.bottomy) / pixdiff;
+						double w1 = ras.v.bottom_weight[0] + wlerp * wdiffs[0],
+							w2 = ras.v.bottom_weight[1] + wlerp * wdiffs[1],
+							w3 = ras.v.bottom_weight[2] + wlerp * wdiffs[2];
+
+						auto uv = uvs[0] * w1 + uvs[1] * w2 + uvs[2] * w3;
+						int zval = static_cast<int>(zvals[0] * w1 + zvals[1] * w2 + zvals[2] * w3);
+						if (zval <= *zbuff)
+						{
+							Point2D pixelcoord = { static_cast<int>(0.5 + uv.X * (framewidth - 1.0)), static_cast<int>(0.5 + uv.Y * (frameheight - 1.0)) };
+
+							auto idx = pixels[framebound.Width * pixelcoord.Y + pixelcoord.X];
+							double ratio = idx / 255.0;
+							WORD& destclr = *reinterpret_cast<PWORD>(&surfacedata[i * pitch + ras.v.x * 2]);
+
+							double b = (destclr & 0x001Fu) * 255.0 / 31.0, g = ((destclr & 0x07E0u) >> 5u) * 255.0 / 63.0, r = ((destclr & 0xF800u) >> 11u) * 255.0 / 31.0;
+							WORD wr = static_cast<WORD>(std::clamp(fcolor.X * ratio + r, 0.0, 255.0)) >> 3u,
+								wg = static_cast<WORD>(std::clamp(fcolor.Y * ratio + g, 0.0, 255.0)) >> 2u,
+								wb = static_cast<WORD>(std::clamp(fcolor.Z * ratio + b, 0.0, 255.0)) >> 3u;
+
+							destclr = (wr << 11u) | (wg << 5u) | (wb);
+						}
+
+						zbuff += zbuffer->W;
+						if (reinterpret_cast<byte*>(zbuff) >= zbuffer->BufferEndpoint)
+							zbuff -= zbuffer->BufferSize / 2u;
+						// *reinterpret_cast<PWORD>(&surfacedata[i * pitch + ras.v.x * 2]) = color;
+					}
+				}
+			}
+		}
+		else // horizontal
+		{
+			for (const auto& ras : result.ranges)
+			{
+				if (ras.h.y >= bound.Y && ras.h.y < bound.Y + bound.Height)
+				{
+					int minpix = std::max(bound.X, ras.h.leftx);
+					int maxpix = std::min(bound.X + bound.Width - 1, ras.h.rightx);
+
+					double pixdiff = ras.h.rightx - ras.h.leftx;
+					double wdiffs[] = { ras.h.right_weight[0] - ras.h.left_weight[0],ras.h.right_weight[1] - ras.h.left_weight[1],ras.h.right_weight[2] - ras.h.left_weight[2] };
+					int row = ras.h.y;
+					auto zbuff = reinterpret_cast<PWORD>(zbuffer->AdjustedGetBufferAt({ minpix,row }));
+
+					for (int i = minpix; i <= maxpix; i++)
+					{
+						double wlerp = pixdiff == 0.0 ? 0.0 : (i - ras.h.leftx) / pixdiff;
+						double w1 = ras.h.left_weight[0] + wlerp * wdiffs[0],
+							w2 = ras.h.left_weight[1] + wlerp * wdiffs[1],
+							w3 = ras.h.left_weight[2] + wlerp * wdiffs[2];
+
+						auto uv = uvs[0] * w1 + uvs[1] * w2 + uvs[2] * w3;
+						int zval = static_cast<int>(zvals[0] * w1 + zvals[1] * w2 + zvals[2] * w3);
+						if (zval <= *zbuff)
+						{
+							Point2D pixelcoord = { static_cast<int>(0.5 + uv.X * (framewidth - 1.0)), static_cast<int>(0.5 + uv.Y * (frameheight - 1.0)) };
+							auto idx = pixels[framebound.Width * pixelcoord.Y + pixelcoord.X];
+							double ratio = idx / 255.0;
+
+							WORD& destclr = *reinterpret_cast<PWORD>(&surfacedata[row * pitch + i * 2]);
+
+							double b = (destclr & 0x001Fu) * 255.0 / 31.0, g = ((destclr & 0x07E0u) >> 5u) * 255.0 / 63.0, r = ((destclr & 0xF800u) >> 11u) * 255.0 / 31.0;
+							WORD wr = static_cast<WORD>(std::clamp(fcolor.X * ratio + r, 0.0, 255.0)) >> 3u,
+								wg = static_cast<WORD>(std::clamp(fcolor.Y * ratio + g, 0.0, 255.0)) >> 2u,
+								wb = static_cast<WORD>(std::clamp(fcolor.Z * ratio + b, 0.0, 255.0)) >> 3u;
+
+							destclr = (wr << 11u) | (wg << 5u) | (wb);
+						}
+
+						zbuff++;
+						if (reinterpret_cast<byte*>(zbuff) >= zbuffer->BufferEndpoint)
+							zbuff -= zbuffer->BufferSize / 2u;
+						/*
+							auto color = *reinterpret_cast<PWORD>(&palette->Midpoint[idx * sizeof WORD]);
+							*reinterpret_cast<PWORD>(&surfacedata[row * pitch + i * 2]) = color;
+						*/
+					}
+				}
+			}
+		}
+	};
+
+	shade(results[0], &texcoords[0], &zvalues[0]);
+	shade(results[1], &texcoords[1], &zvalues[1]);
+
+	surface->Unlock();
+	return 0x5511C3;
+} 

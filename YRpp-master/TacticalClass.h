@@ -61,6 +61,18 @@ public:
 
 	static int DrawTimer(int index, ColorScheme *Scheme, int Time, wchar_t *Text, Point2D *someXY1, Point2D *someXY2)
 		{ JMP_STD(0x64DB50); }
+	
+	static __int64 __fastcall ZCoordsToScreenPixels64(const int nZCoords) //return __int64
+		{ JMP_STD(0x6D20E0); };
+
+	static __int64 __fastcall ZCoordsToZAdjust64(const int nZCoords)
+		{ return ZCoordsToScreenPixels64(nZCoords)/* / 3*/; }
+
+	static int __fastcall ZCoordsToScreenPixels(const int nZCoords)
+		{ return static_cast<int>(ZCoordsToScreenPixels64(nZCoords)); }
+
+	static int __fastcall ZCoordsToZAdjust(const int nZCoords)
+		{ return static_cast<int>(ZCoordsToZAdjust64(nZCoords)); }
 
 public:
 
